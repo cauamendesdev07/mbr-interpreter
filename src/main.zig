@@ -10,11 +10,14 @@ const PARTITION_ENTRY_SIZE: usize = 16;
 const PARTITION_COUNT: usize = 4;
 const SECTOR_SIZE: u64 = 512;
 
-fn readU32LE(bytes: [4]u8) u64 {
-    return @as(u64, bytes[0]) |
-        (@as(u64, bytes[1]) << 8) |
-        (@as(u64, bytes[2]) << 16) |
-        (@as(u64, bytes[3]) << 24);
+fn reverse(comptime N: usize, bytes: [N]u8) [N]u8 {
+    var result: [N]u8 = undefined;
+
+    for (0..N) |i| {
+        result[i] = bytes[N - 1 - i];
+    }
+
+    return result;
 }
 
 fn partitionTypeName(partition_type: u8) []const u8 {
@@ -132,13 +135,15 @@ pub fn main(init: std.process.Init) !void {
         const boot_flag = entry[0];
         const partition_type = entry[4];
 
-        const start_lba: u64 = readU32LE(.{
+        const start_lba_bytes = reverse(4, .{
             entry[8], entry[9], entry[10], entry[11],
         });
+        const start_lba: u64 = std.mem.readInt(u32, &start_lba_bytes, .big);
 
-        const sector_count: u64 = readU32LE(.{
+        const sector_count_bytes = reverse(4, .{
             entry[12], entry[13], entry[14], entry[15],
         });
+        const sector_count: u64 = std.mem.readInt(u32, &sector_count_bytes, .big);
 
         if (partition_type == 0 and sector_count == 0) {
             try writer.print(
@@ -274,4 +279,12 @@ test "diskIdToHex formats upper-case" {
 
     var zero = [4]u8{ 0x00, 0x00, 0x00, 0x00 };
     try std.testing.expectEqualStrings("00000000", diskIdToHex(&zero)[0..]);
+}
+
+test "reverse flips byte order" {
+    const four = reverse(4, .{ 0xAA, 0xBB, 0xCC, 0xDD });
+    try std.testing.expectEqualSlices(u8, &.{ 0xDD, 0xCC, 0xBB, 0xAA }, &four);
+
+    const two = reverse(2, .{ 0x12, 0x34 });
+    try std.testing.expectEqualSlices(u8, &.{ 0x34, 0x12 }, &two);
 }
