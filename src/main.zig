@@ -24,7 +24,9 @@ fn partitionTypeName(partition_type: u8) []const u8 {
     return switch (partition_type) {
         0x01 => "FAT12",
         0x04, 0x06, 0x0E => "FAT16",
-        0x05, 0x0F => "Particao estendida",
+        0x05 => "Particao estendida CHS",
+	0x0F => "Particao estendida LBA",
+	0x85 => "Particao estendida Linux",
         0x07 => "NTFS/exFAT/HPFS",
         0x0B, 0x0C => "FAT32",
         0x82 => "Linux swap",
@@ -84,7 +86,22 @@ pub fn main(init: std.process.Init) !void {
     	}
 
 	var mbr_check_buf: [2]u8 = undefined;
-    	const file = try std.Io.Dir.cwd().openFile(io, args[1], .{});
+    	const file = try std.Io.Dir.cwd().openFile(io, args[1], .{}) catch |err| {
+		switch (err) {
+        		error.FileNotFound => {
+            			try writer.print("Erro: arquivo '{s}' não encontrado.\n", .{args[1]});
+        		},
+        		error.AccessDenied => {
+            			try writer.print("Erro: sem permissão para acessar '{s}'.\n", .{args[1]});
+        		},
+        		else => {
+		    		try writer.print("Erro ao abrir o arquivo: {s}\n", .{@errorName(err)});
+	    		},
+    		}
+
+		try writer.flush();
+    		return;
+	};
     	defer file.close(io);
 
 	if (validateSize(try file.length(io)) == false) {
@@ -92,6 +109,14 @@ pub fn main(init: std.process.Init) !void {
         	try writer.flush();
         	return;
     	}
+
+	const image_size = try file.length(io);
+
+	if (image_size % 512 != 0){
+	    try writer.print("Erro: Imagem truncada.\n", .{});
+  	    try writer.flush();
+	    return;
+	}	
 	
 	_ = try file.readPositionalAll(io, &mbr_check_buf, MBR_CHECK_START_OFFSET);
     	const mbr_check_buf_hex = signatureToHex(&mbr_check_buf);
@@ -139,19 +164,44 @@ pub fn main(init: std.process.Init) !void {
             entry[8], entry[9], entry[10], entry[11],
         });
         const start_lba: u64 = std.mem.readInt(u32, &start_lba_bytes, .big);
+	
+	if(start_lba == 0) {
+	    try writer.print(
+		"\nAviso: LBA inclui indevidamente o setor 0\n",
+		.{},
+	    );
+	    continue;
+	}
+	
 
         const sector_count_bytes = reverse(4, .{
             entry[12], entry[13], entry[14], entry[15],
         });
         const sector_count: u64 = std.mem.readInt(u32, &sector_count_bytes, .big);
 
-        if (partition_type == 0 and sector_count == 0) {
+        if (partition_type == 0) {
             try writer.print(
                 "\nParticao {d}: vazia\n",
                 .{i + 1},
             );
             continue;
         }
+
+        if (partition_type == 0xEE) {
+            try writer.print(
+                "\nAviso: Particao MBR protetor de GPT\n",
+                .{},
+            );
+            continue;
+        }
+
+	if (sector_count == 0) {
+	    try writer.print(
+		"\nParticao {d}: tipo {s} (0x{x}), tamanho zero\n",
+		.{i + 1, partitionTypeName(partition_type), partition_type},
+	    );
+	    continue;
+	}
 
         const boot_status: []const u8 = switch (boot_flag) {
             0x80 => "Inicializavel",
@@ -195,7 +245,7 @@ pub fn main(init: std.process.Init) !void {
             .{end_lba},
         );
 
-        if (end_byte > image_size) {
+        if (start_byte > image_size && end_byte > image_size) {
             try writer.print(
                 "  ERRO: particao ultrapassa o tamanho da imagem\n",
                 .{},
