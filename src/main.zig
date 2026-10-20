@@ -245,7 +245,7 @@ pub fn main(init: std.process.Init) !void {
             .{end_lba},
         );
 
-        if (start_byte > image_size && end_byte > image_size) {
+        if (start_byte > image_size and end_byte > image_size) {
             try writer.print(
                 "  ERRO: particao ultrapassa o tamanho da imagem\n",
                 .{},
