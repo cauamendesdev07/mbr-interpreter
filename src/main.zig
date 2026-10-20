@@ -138,8 +138,6 @@ pub fn main(init: std.process.Init) !void {
 	
 	try writer.flush();
 
-   const image_size = try file.length(io);
-
     try writer.print(
         "Capacidade da imagem: {d} MiB\n",
         .{image_size / (1024 * 1024)},
