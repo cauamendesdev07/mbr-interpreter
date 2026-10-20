@@ -179,19 +179,19 @@ pub fn main(init: std.process.Init) !void {
 
         if (partition_type == 0) {
             try writer.print(
-                "\nParticao {d}: vazia\n",
+               "\nERRO: Particao {d} inconsistente: tipo 0x00, mas a entrada nao esta totalmente zerada\n",
                 .{i + 1},
             );
             continue;
         }
 
-        if (partition_type == 0xEE) {
-            try writer.print(
-                "\nAviso: Particao MBR protetor de GPT\n",
-                .{},
-            );
-            continue;
-        }
+	if (partition_type == 0xEE) {
+    	    try writer.print(
+            "\nAviso: Particao MBR protetor de GPT\n",
+            .{},
+    	);
+    	continue;
+	}
 
 	if (sector_count == 0) {
 	    try writer.print(
@@ -243,6 +243,7 @@ pub fn main(init: std.process.Init) !void {
             .{end_lba},
         );
 
+<<<<<<< HEAD
         if (start_byte > image_size and end_byte > image_size) {
             try writer.print(
                 "  ERRO: particao ultrapassa o tamanho da imagem\n",
@@ -253,6 +254,11 @@ pub fn main(init: std.process.Init) !void {
         partition_starts[i] = start_lba;
         partition_ends[i] = start_lba + sector_count;
         valid_partitions[i] = true;
+=======
+	partition_starts[i] = start_lba;
+	partition_ends[i] = start_lba + sector_count;
+	valid_partitions[i] = true;
+>>>>>>> 18e4530 (Atualiza interpretador MBR e adiciona testes)
     }
 
     for (0..PARTITION_COUNT) |i| {
