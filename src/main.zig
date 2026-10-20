@@ -86,7 +86,7 @@ pub fn main(init: std.process.Init) !void {
     	}
 
 	var mbr_check_buf: [2]u8 = undefined;
-    	const file = try std.Io.Dir.cwd().openFile(io, args[1], .{}) catch |err| {
+    	const file = std.Io.Dir.cwd().openFile(io, args[1], .{}) catch |err| {
 		switch (err) {
         		error.FileNotFound => {
             			try writer.print("Erro: arquivo '{s}' não encontrado.\n", .{args[1]});
