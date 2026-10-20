@@ -86,7 +86,7 @@ pub fn main(init: std.process.Init) !void {
     	}
 
 	var mbr_check_buf: [2]u8 = undefined;
-    	const file = try std.Io.Dir.cwd().openFile(io, args[1], .{}) catch |err| {
+    	const file = std.Io.Dir.cwd().openFile(io, args[1], .{}) catch |err| {
 		switch (err) {
         		error.FileNotFound => {
             			try writer.print("Erro: arquivo '{s}' não encontrado.\n", .{args[1]});
@@ -137,8 +137,6 @@ pub fn main(init: std.process.Init) !void {
 	try writer.print("Identificador de Disco: 0x{s}\n", .{mbr_id_disk_hex});
 	
 	try writer.flush();
-
-   const image_size = try file.length(io);
 
     try writer.print(
         "Capacidade da imagem: {d} MiB\n",
@@ -245,7 +243,7 @@ pub fn main(init: std.process.Init) !void {
             .{end_lba},
         );
 
-        if (start_byte > image_size && end_byte > image_size) {
+        if (start_byte > image_size and end_byte > image_size) {
             try writer.print(
                 "  ERRO: particao ultrapassa o tamanho da imagem\n",
                 .{},
