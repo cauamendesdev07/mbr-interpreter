@@ -53,14 +53,30 @@ fn validateSize(len: u64) bool {
     return len >= MBR_SIZE;
 }
 
+fn partitionsOverlap(
+    start_a: u64,
+    end_a: u64,
+    start_b: u64,
+    end_b: u64,
+) bool {
+    return start_a < end_b and start_b < end_a;
+}
+
+fn partitionFitsImage(
+    start_lba: u64,
+    sector_count: u64,
+    image_sectors: u64,
+) bool {
+    if (start_lba >= image_sectors) return false;
+
+    return sector_count <= image_sectors - start_lba;
+}
+
 fn parseSignature(buf: [2]u8) MbrSignature {
-    if (std.mem.eql(u8, buf[0..], BIG_ENDIAN_MBR_BYTES[0..])) {
-        return .big_endian;
-    } else if (std.mem.eql(u8, buf[0..], LITTLE_ENDIAN_MBR_BYTES[0..])) {
+    if (std.mem.eql(u8, buf[0..], LITTLE_ENDIAN_MBR_BYTES[0..])) {
         return .little_endian;
-    } else {
-        return .invalid;
-    }
+    } 
+    return .invalid;
 }
 
 fn signatureToHex(buf: *const [2]u8) [4]u8 {
@@ -68,7 +84,18 @@ fn signatureToHex(buf: *const [2]u8) [4]u8 {
 }
 
 fn diskIdToHex(buf: *const [4]u8) [8]u8 {
-    return std.fmt.bytesToHex(buf, .upper);
+    const value = std.mem.readInt(u32, buf, .little);
+
+    return .{
+        std.fmt.digitToChar(@truncate((value >> 28) & 0xF), .upper),
+        std.fmt.digitToChar(@truncate((value >> 24) & 0xF), .upper),
+        std.fmt.digitToChar(@truncate((value >> 20) & 0xF), .upper),
+        std.fmt.digitToChar(@truncate((value >> 16) & 0xF), .upper),
+        std.fmt.digitToChar(@truncate((value >> 12) & 0xF), .upper),
+        std.fmt.digitToChar(@truncate((value >> 8) & 0xF), .upper),
+        std.fmt.digitToChar(@truncate((value >> 4) & 0xF), .upper),
+        std.fmt.digitToChar(@truncate(value & 0xF), .upper),
+    };
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -158,19 +185,23 @@ pub fn main(init: std.process.Init) !void {
         const boot_flag = entry[0];
         const partition_type = entry[4];
 
+	var entry_is_empty = true;
+	for (entry) |byte| {
+	    if (byte != 0) {
+		entry_is_empty = false;
+		break;
+	    }
+	}
+	
+	if (entry_is_empty) {
+	    try writer.print("\nParticao {d}: vazia\n", .{i + 1});
+	    continue;
+	}
+
         const start_lba_bytes = reverse(4, .{
             entry[8], entry[9], entry[10], entry[11],
         });
         const start_lba: u64 = std.mem.readInt(u32, &start_lba_bytes, .big);
-	
-	if(start_lba == 0) {
-	    try writer.print(
-		"\nAviso: LBA inclui indevidamente o setor 0\n",
-		.{},
-	    );
-	    continue;
-	}
-	
 
         const sector_count_bytes = reverse(4, .{
             entry[12], entry[13], entry[14], entry[15],
@@ -201,11 +232,26 @@ pub fn main(init: std.process.Init) !void {
 	    continue;
 	}
 
-        const boot_status: []const u8 = switch (boot_flag) {
-            0x80 => "Inicializavel",
-            0x00 => "Nao inicializavel",
-            else => "Flag invalida",
-        };
+	if (start_lba == 0) {
+    	    try writer.print(
+        	"\nERRO: particao {d} possui LBA inicial zero\n",
+        	.{i + 1},
+    	    );
+    	    continue;
+	}
+
+	const boot_status: []const u8 = switch (boot_flag) {
+    	    0x80 => "Inicializavel",
+    	    0x00 => "Nao inicializavel",
+    	    else => "Flag invalida",
+	};
+
+	if (boot_flag != 0x00 and boot_flag != 0x80) {
+    	    try writer.print(
+        	"\nAVISO: flag de boot invalida (0x{X})\n",
+        	.{boot_flag},
+    	    );
+	}
 
         try writer.print("\nParticao {d}\n", .{i + 1});
         try writer.print("  Boot: {s}\n", .{boot_status});
@@ -217,18 +263,19 @@ pub fn main(init: std.process.Init) !void {
         try writer.print("  LBA inicial: {d}\n", .{start_lba});
         try writer.print("  Setores: {d}\n", .{sector_count});
 
-        if (sector_count == 0) {
-            try writer.print(
-                "  Aviso: particao com zero setores\n",
-                .{},
-            );
-            continue;
-        }
+const image_sectors = image_size / SECTOR_SIZE;
 
-        const start_byte = start_lba * SECTOR_SIZE;
-        const size_bytes = sector_count * SECTOR_SIZE;
-        const end_byte = start_byte + size_bytes;
-        const end_lba = start_lba + sector_count - 1;
+if (!partitionFitsImage(start_lba, sector_count, image_sectors)) {
+    try writer.print(
+        "  ERRO: particao ultrapassa o tamanho da imagem\n",
+        .{},
+    );
+    continue;
+}
+
+const start_byte = start_lba * SECTOR_SIZE;
+const size_bytes = sector_count * SECTOR_SIZE;
+const end_lba = start_lba + sector_count - 1;
 
         try writer.print(
             "  Offset inicial: {d} bytes\n",
@@ -243,13 +290,6 @@ pub fn main(init: std.process.Init) !void {
             .{end_lba},
         );
 
-        if (start_byte > image_size and end_byte > image_size) {
-            try writer.print(
-                "  ERRO: particao ultrapassa o tamanho da imagem\n",
-                .{},
-            );
-        }
-
         partition_starts[i] = start_lba;
         partition_ends[i] = start_lba + sector_count;
         valid_partitions[i] = true;
@@ -261,8 +301,12 @@ pub fn main(init: std.process.Init) !void {
         for (i + 1..PARTITION_COUNT) |j| {
             if (!valid_partitions[j]) continue;
 
-            if (partition_starts[i] < partition_ends[j] and
-                partition_starts[j] < partition_ends[i])
+            if (partitionsOverlap(
+    		partition_starts[i],
+    		partition_ends[i],
+    		partition_starts[j],
+    		partition_ends[j],
+	    	))
             {
                 try writer.print(
                     "AVISO: particoes {d} e {d} se sobrepoem\n",
@@ -297,9 +341,16 @@ test "validateSize enforces 512-byte minimum" {
     try std.testing.expect(validateSize(1024));
 }
 
-test "parseSignature detects endianness" {
-    try std.testing.expectEqual(MbrSignature.big_endian, parseSignature(.{ 0xAA, 0x55 }));
-    try std.testing.expectEqual(MbrSignature.little_endian, parseSignature(.{ 0x55, 0xAA }));
+test "parseSignature accepts only 55 AA" {
+    try std.testing.expectEqual(
+        MbrSignature.little_endian,
+        parseSignature(.{ 0x55, 0xAA }),
+    );
+
+    try std.testing.expectEqual(
+        MbrSignature.invalid,
+        parseSignature(.{ 0xAA, 0x55 }),
+    );
 }
 
 test "parseSignature rejects invalid signatures" {
@@ -318,14 +369,14 @@ test "signatureToHex formats upper-case" {
     try std.testing.expectEqualStrings("AA55", signatureToHex(&big)[0..]);
 }
 
-test "diskIdToHex formats upper-case" {
-    var id = [4]u8{ 0x12, 0x34, 0x56, 0x78 };
+test "diskIdToHex interprets little-endian identifier" {
+    const id = [4]u8{ 0x78, 0x56, 0x34, 0x12 };
     try std.testing.expectEqualStrings("12345678", diskIdToHex(&id)[0..]);
 
-    var dead = [4]u8{ 0xDE, 0xAD, 0xBE, 0xEF };
+    const dead = [4]u8{ 0xEF, 0xBE, 0xAD, 0xDE };
     try std.testing.expectEqualStrings("DEADBEEF", diskIdToHex(&dead)[0..]);
 
-    var zero = [4]u8{ 0x00, 0x00, 0x00, 0x00 };
+    const zero = [4]u8{ 0x00, 0x00, 0x00, 0x00 };
     try std.testing.expectEqualStrings("00000000", diskIdToHex(&zero)[0..]);
 }
 
@@ -335,4 +386,47 @@ test "reverse flips byte order" {
 
     const two = reverse(2, .{ 0x12, 0x34 });
     try std.testing.expectEqualSlices(u8, &.{ 0x34, 0x12 }, &two);
+}
+
+test "partitionsOverlap detects overlapping intervals" {
+
+    try std.testing.expect(
+        partitionsOverlap(1, 101, 50, 150),
+    );
+
+
+    try std.testing.expect(
+        partitionsOverlap(10, 100, 20, 30),
+    );
+
+
+    try std.testing.expect(
+        !partitionsOverlap(1, 20, 20, 40),
+    );
+
+    try std.testing.expect(
+        !partitionsOverlap(1, 10, 20, 30),
+    );
+}
+
+test "partitionFitsImage validates partition bounds" {
+    try std.testing.expect(
+        partitionFitsImage(1, 100, 2048),
+    );
+
+    try std.testing.expect(
+        partitionFitsImage(1948, 100, 2048),
+    );
+
+    try std.testing.expect(
+        !partitionFitsImage(2000, 100, 2048),
+    );
+
+    try std.testing.expect(
+        !partitionFitsImage(2048, 1, 2048),
+    );
+
+    try std.testing.expect(
+        !partitionFitsImage(0, 1, 0),
+    );
 }
