@@ -1,432 +1,56 @@
 const std = @import("std");
-
-const BIG_ENDIAN_MBR_BYTES = [2]u8{ 0xAA, 0x55 };
-const LITTLE_ENDIAN_MBR_BYTES = [2]u8{ 0x55, 0xAA };
-const MBR_SIZE = 512;
-const MBR_CHECK_START_OFFSET = 510;
-const MBR_ID_START_OFFSET = 440;
-const PARTITION_TABLE_START: u64 = 446;
-const PARTITION_ENTRY_SIZE: usize = 16;
-const PARTITION_COUNT: usize = 4;
-const SECTOR_SIZE: u64 = 512;
-
-fn reverse(comptime N: usize, bytes: [N]u8) [N]u8 {
-    var result: [N]u8 = undefined;
-
-    for (0..N) |i| {
-        result[i] = bytes[N - 1 - i];
-    }
-
-    return result;
-}
-
-fn partitionTypeName(partition_type: u8) []const u8 {
-    return switch (partition_type) {
-        0x01 => "FAT12",
-        0x04, 0x06, 0x0E => "FAT16",
-        0x05 => "Particao estendida CHS",
-	0x0F => "Particao estendida LBA",
-	0x85 => "Particao estendida Linux",
-        0x07 => "NTFS/exFAT/HPFS",
-        0x0B, 0x0C => "FAT32",
-        0x82 => "Linux swap",
-        0x83 => "Linux",
-        0x8E => "Linux LVM",
-        0xEE => "GPT protective",
-        0xEF => "EFI System",
-        0x00 => "Vazio",
-        else => "Desconhecido",
-    };
-}
-
-const MbrSignature = enum {
-    big_endian,
-    little_endian,
-    invalid,
-};
-
-fn validateArgs(args: []const [:0]const u8) bool {
-    return args.len == 2;
-}
-
-fn validateSize(len: u64) bool {
-    return len >= MBR_SIZE;
-}
-
-fn partitionsOverlap(
-    start_a: u64,
-    end_a: u64,
-    start_b: u64,
-    end_b: u64,
-) bool {
-    return start_a < end_b and start_b < end_a;
-}
-
-fn partitionFitsImage(
-    start_lba: u64,
-    sector_count: u64,
-    image_sectors: u64,
-) bool {
-    if (start_lba >= image_sectors) return false;
-
-    return sector_count <= image_sectors - start_lba;
-}
-
-fn parseSignature(buf: [2]u8) MbrSignature {
-    if (std.mem.eql(u8, buf[0..], LITTLE_ENDIAN_MBR_BYTES[0..])) {
-        return .little_endian;
-    } 
-    return .invalid;
-}
-
-fn signatureToHex(buf: *const [2]u8) [4]u8 {
-    return std.fmt.bytesToHex(buf, .upper);
-}
-
-fn diskIdToHex(buf: *const [4]u8) [8]u8 {
-    const value = std.mem.readInt(u32, buf, .little);
-
-    return .{
-        std.fmt.digitToChar(@truncate((value >> 28) & 0xF), .upper),
-        std.fmt.digitToChar(@truncate((value >> 24) & 0xF), .upper),
-        std.fmt.digitToChar(@truncate((value >> 20) & 0xF), .upper),
-        std.fmt.digitToChar(@truncate((value >> 16) & 0xF), .upper),
-        std.fmt.digitToChar(@truncate((value >> 12) & 0xF), .upper),
-        std.fmt.digitToChar(@truncate((value >> 8) & 0xF), .upper),
-        std.fmt.digitToChar(@truncate((value >> 4) & 0xF), .upper),
-        std.fmt.digitToChar(@truncate(value & 0xF), .upper),
-    };
-}
+const reader = @import("reader.zig");
+const report = @import("report.zig");
 
 pub fn main(init: std.process.Init) !void {
-	const io = init.io;
-	const args = try init.minimal.args.toSlice(init.arena.allocator());
-	
-	var stdout_buf: [1024]u8 = undefined;
-    	var writer_impl = std.Io.File.stdout().writer(io, stdout_buf[0..]);
-    	const writer = &writer_impl.interface;
-	
-	if (validateArgs(args) == false) {
-        	try writer.print("Usage: mbr-check <file>\n", .{});
-        	try writer.flush();
-        	return;
-    	}
+    const io = init.io;
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
 
-	var mbr_check_buf: [2]u8 = undefined;
-    	const file = std.Io.Dir.cwd().openFile(io, args[1], .{}) catch |err| {
-		switch (err) {
-        		error.FileNotFound => {
-            			try writer.print("Erro: arquivo '{s}' não encontrado.\n", .{args[1]});
-        		},
-        		error.AccessDenied => {
-            			try writer.print("Erro: sem permissão para acessar '{s}'.\n", .{args[1]});
-        		},
-        		else => {
-		    		try writer.print("Erro ao abrir o arquivo: {s}\n", .{@errorName(err)});
-	    		},
-    		}
+    var stdout_buf: [4096]u8 = undefined;
+    var stdout_impl = std.Io.File.stdout().writer(io, &stdout_buf);
+    const stdout = &stdout_impl.interface;
 
-		try writer.flush();
-    		return;
-	};
-    	defer file.close(io);
+    var stderr_buf: [1024]u8 = undefined;
+    var stderr_impl = std.Io.File.stderr().writer(io, &stderr_buf);
+    const stderr = &stderr_impl.interface;
 
-	if (validateSize(try file.length(io)) == false) {
-        	try writer.print("File too small\n", .{});
-        	try writer.flush();
-        	return;
-    	}
-
-	const image_size = try file.length(io);
-
-	if (image_size % 512 != 0){
-	    try writer.print("Erro: Imagem truncada.\n", .{});
-  	    try writer.flush();
-	    return;
-	}	
-	
-	_ = try file.readPositionalAll(io, &mbr_check_buf, MBR_CHECK_START_OFFSET);
-    	const mbr_check_buf_hex = signatureToHex(&mbr_check_buf);
-	
-	const signature = parseSignature(mbr_check_buf);
-
-	if (signature == .invalid) {
-        	try writer.print("Not a MBR: {s}\n", .{mbr_check_buf_hex});
-		try writer.flush();
-		return;
-	}	
-	
-	var mbr_id_disk: [4]u8 = undefined;
-	_ = try file.readPositionalAll(io, &mbr_id_disk, MBR_ID_START_OFFSET);	
-    	const mbr_id_disk_hex = diskIdToHex(&mbr_id_disk);
-
-	try writer.print("Assinatura: valida {s}\n", .{mbr_check_buf_hex});	
-	try writer.print("Identificador de Disco: 0x{s}\n", .{mbr_id_disk_hex});
-	
-	try writer.flush();
-
-    try writer.print(
-        "Capacidade da imagem: {d} MiB\n",
-        .{image_size / (1024 * 1024)},
-    );
-
-    var partition_starts: [PARTITION_COUNT]u64 = undefined;
-    var partition_ends: [PARTITION_COUNT]u64 = undefined;
-    var valid_partitions: [PARTITION_COUNT]bool = [_]bool{false} ** PARTITION_COUNT;
-
-    for (0..PARTITION_COUNT) |i| {
-        var entry: [PARTITION_ENTRY_SIZE]u8 = undefined;
-
-        const entry_offset = PARTITION_TABLE_START +
-            @as(u64, @intCast(i)) * PARTITION_ENTRY_SIZE;
-
-        _ = try file.readPositionalAll(io, &entry, entry_offset);
-
-        const boot_flag = entry[0];
-        const partition_type = entry[4];
-
-	var entry_is_empty = true;
-	for (entry) |byte| {
-	    if (byte != 0) {
-		entry_is_empty = false;
-		break;
-	    }
-	}
-	
-	if (entry_is_empty) {
-	    try writer.print("\nParticao {d}: vazia\n", .{i + 1});
-	    continue;
-	}
-
-        const start_lba_bytes = reverse(4, .{
-            entry[8], entry[9], entry[10], entry[11],
-        });
-        const start_lba: u64 = std.mem.readInt(u32, &start_lba_bytes, .big);
-
-        const sector_count_bytes = reverse(4, .{
-            entry[12], entry[13], entry[14], entry[15],
-        });
-        const sector_count: u64 = std.mem.readInt(u32, &sector_count_bytes, .big);
-
-        if (partition_type == 0) {
-            try writer.print(
-               "\nERRO: Particao {d} inconsistente: tipo 0x00, mas a entrada nao esta totalmente zerada\n",
-                .{i + 1},
-            );
-            continue;
-        }
-
-	if (partition_type == 0xEE) {
-    	    try writer.print(
-            "\nAviso: Particao MBR protetor de GPT\n",
-            .{},
-    	);
-    	continue;
-	}
-
-	if (sector_count == 0) {
-	    try writer.print(
-		"\nParticao {d}: tipo {s} (0x{x}), tamanho zero\n",
-		.{i + 1, partitionTypeName(partition_type), partition_type},
-	    );
-	    continue;
-	}
-
-	if (start_lba == 0) {
-    	    try writer.print(
-        	"\nERRO: particao {d} possui LBA inicial zero\n",
-        	.{i + 1},
-    	    );
-    	    continue;
-	}
-
-	const boot_status: []const u8 = switch (boot_flag) {
-    	    0x80 => "Inicializavel",
-    	    0x00 => "Nao inicializavel",
-    	    else => "Flag invalida",
-	};
-
-	if (boot_flag != 0x00 and boot_flag != 0x80) {
-    	    try writer.print(
-        	"\nAVISO: flag de boot invalida (0x{X})\n",
-        	.{boot_flag},
-    	    );
-	}
-
-        try writer.print("\nParticao {d}\n", .{i + 1});
-        try writer.print("  Boot: {s}\n", .{boot_status});
-        try writer.print("  Flag: 0x{X}\n", .{boot_flag});
-        try writer.print(
-            "  Tipo: 0x{X} ({s})\n",
-            .{ partition_type, partitionTypeName(partition_type) },
-        );
-        try writer.print("  LBA inicial: {d}\n", .{start_lba});
-        try writer.print("  Setores: {d}\n", .{sector_count});
-
-const image_sectors = image_size / SECTOR_SIZE;
-
-if (!partitionFitsImage(start_lba, sector_count, image_sectors)) {
-    try writer.print(
-        "  ERRO: particao ultrapassa o tamanho da imagem\n",
-        .{},
-    );
-    continue;
-}
-
-const start_byte = start_lba * SECTOR_SIZE;
-const size_bytes = sector_count * SECTOR_SIZE;
-const end_lba = start_lba + sector_count - 1;
-
-        try writer.print(
-            "  Offset inicial: {d} bytes\n",
-            .{start_byte},
-        );
-        try writer.print(
-            "  Tamanho: {d} bytes\n",
-            .{size_bytes},
-        );
-        try writer.print(
-            "  LBA final: {d}\n",
-            .{end_lba},
-        );
-
-	partition_starts[i] = start_lba;
-	partition_ends[i] = start_lba + sector_count;
-	valid_partitions[i] = true;
+    if (args.len != 2) {
+        try stderr.print("Uso: mbrcli <caminho/para/disco.img>\n", .{});
+        try stderr.flush();
+        std.process.exit(1);
     }
 
-    for (0..PARTITION_COUNT) |i| {
-        if (!valid_partitions[i]) continue;
-
-        for (i + 1..PARTITION_COUNT) |j| {
-            if (!valid_partitions[j]) continue;
-
-            if (partitionsOverlap(
-    		partition_starts[i],
-    		partition_ends[i],
-    		partition_starts[j],
-    		partition_ends[j],
-	    	))
-            {
-                try writer.print(
-                    "AVISO: particoes {d} e {d} se sobrepoem\n",
-                    .{ i + 1, j + 1 },
-                );
-            }
+    const loaded = reader.load(io, args[1]) catch |err| {
+        switch (err) {
+            error.FileNotFound => try stderr.print(
+                "Erro: arquivo '{s}' não encontrado.\n",
+                .{args[1]},
+            ),
+            error.AccessDenied => try stderr.print(
+                "Erro: sem permissão para acessar '{s}'.\n",
+                .{args[1]},
+            ),
+            error.NotRegularFile => try stderr.print(
+                "Erro: '{s}' não é um arquivo regular.\n",
+                .{args[1]},
+            ),
+            error.FileTooSmall => try stderr.print(
+                "Erro: '{s}' tem menos de 512 bytes; não contém um MBR completo.\n",
+                .{args[1]},
+            ),
+            error.InvalidSignature => try stderr.print(
+                "Erro: assinatura MBR inválida em '{s}'; esperado 55 AA nos offsets 510-511.\n",
+                .{args[1]},
+            ),
+            else => try stderr.print(
+                "Erro ao ler '{s}': {s}\n",
+                .{ args[1], @errorName(err) },
+            ),
         }
-    }
+        try stderr.flush();
+        std.process.exit(1);
+    };
 
-    try writer.flush();
-}
-
-test "validateArgs requires program plus file" {
-    const ok = [_][:0]const u8{ "mbr-check", "disk.img" };
-    try std.testing.expect(validateArgs(&ok));
-
-    const empty = [_][:0]const u8{};
-    try std.testing.expect(!validateArgs(&empty));
-
-    const one = [_][:0]const u8{"mbr-check"};
-    try std.testing.expect(!validateArgs(&one));
-
-    const three = [_][:0]const u8{ "mbr-check", "a.img", "b.img" };
-    try std.testing.expect(!validateArgs(&three));
-}
-
-test "validateSize enforces 512-byte minimum" {
-    try std.testing.expect(!validateSize(0));
-    try std.testing.expect(!validateSize(511));
-    try std.testing.expect(validateSize(512));
-    try std.testing.expect(validateSize(513));
-    try std.testing.expect(validateSize(1024));
-}
-
-test "parseSignature accepts only 55 AA" {
-    try std.testing.expectEqual(
-        MbrSignature.little_endian,
-        parseSignature(.{ 0x55, 0xAA }),
-    );
-
-    try std.testing.expectEqual(
-        MbrSignature.invalid,
-        parseSignature(.{ 0xAA, 0x55 }),
-    );
-}
-
-test "parseSignature rejects invalid signatures" {
-    try std.testing.expectEqual(MbrSignature.invalid, parseSignature(.{ 0x00, 0x00 }));
-    try std.testing.expectEqual(MbrSignature.invalid, parseSignature(.{ 0xFF, 0xFF }));
-    try std.testing.expectEqual(MbrSignature.invalid, parseSignature(.{ 0xAA, 0xAA }));
-    try std.testing.expectEqual(MbrSignature.invalid, parseSignature(.{ 0x55, 0x55 }));
-    try std.testing.expectEqual(MbrSignature.invalid, parseSignature(.{ 0x55, 0x00 }));
-}
-
-test "signatureToHex formats upper-case" {
-    var little = [2]u8{ 0x55, 0xAA };
-    try std.testing.expectEqualStrings("55AA", signatureToHex(&little)[0..]);
-
-    var big = [2]u8{ 0xAA, 0x55 };
-    try std.testing.expectEqualStrings("AA55", signatureToHex(&big)[0..]);
-}
-
-test "diskIdToHex interprets little-endian identifier" {
-    const id = [4]u8{ 0x78, 0x56, 0x34, 0x12 };
-    try std.testing.expectEqualStrings("12345678", diskIdToHex(&id)[0..]);
-
-    const dead = [4]u8{ 0xEF, 0xBE, 0xAD, 0xDE };
-    try std.testing.expectEqualStrings("DEADBEEF", diskIdToHex(&dead)[0..]);
-
-    const zero = [4]u8{ 0x00, 0x00, 0x00, 0x00 };
-    try std.testing.expectEqualStrings("00000000", diskIdToHex(&zero)[0..]);
-}
-
-test "reverse flips byte order" {
-    const four = reverse(4, .{ 0xAA, 0xBB, 0xCC, 0xDD });
-    try std.testing.expectEqualSlices(u8, &.{ 0xDD, 0xCC, 0xBB, 0xAA }, &four);
-
-    const two = reverse(2, .{ 0x12, 0x34 });
-    try std.testing.expectEqualSlices(u8, &.{ 0x34, 0x12 }, &two);
-}
-
-test "partitionsOverlap detects overlapping intervals" {
-
-    try std.testing.expect(
-        partitionsOverlap(1, 101, 50, 150),
-    );
-
-
-    try std.testing.expect(
-        partitionsOverlap(10, 100, 20, 30),
-    );
-
-
-    try std.testing.expect(
-        !partitionsOverlap(1, 20, 20, 40),
-    );
-
-    try std.testing.expect(
-        !partitionsOverlap(1, 10, 20, 30),
-    );
-}
-
-test "partitionFitsImage validates partition bounds" {
-    try std.testing.expect(
-        partitionFitsImage(1, 100, 2048),
-    );
-
-    try std.testing.expect(
-        partitionFitsImage(1948, 100, 2048),
-    );
-
-    try std.testing.expect(
-        !partitionFitsImage(2000, 100, 2048),
-    );
-
-    try std.testing.expect(
-        !partitionFitsImage(2048, 1, 2048),
-    );
-
-    try std.testing.expect(
-        !partitionFitsImage(0, 1, 0),
-    );
+    try report.writeReport(stdout, args[1], &loaded.mbr, loaded.image_size);
+    try stdout.flush();
 }
