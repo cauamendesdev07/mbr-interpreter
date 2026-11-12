@@ -1,0 +1,16 @@
+.{
+    .name = .mbr_interpreter,
+    .version = "0.1.0",
+    .fingerprint = 0x4ba2e4653f10f6b3,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "tests.zig",
+        "tests",
+        "fixtures",
+        "README.md",
+    },
+}
